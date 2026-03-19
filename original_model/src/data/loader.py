@@ -1,5 +1,6 @@
+from src.data.integrated_atomic_collector import IntegratedAtomicCollector
 import pandas as pd
-import gc
+import os
 
 class DataLoader:
     def __init__(self):
