@@ -1,0 +1,19 @@
+# Monster_Quant 프로젝트 환경 설정
+API_KEYS:
+  NAVER_CLIENT_ID: "여기에_입력하세요"
+  NAVER_CLIENT_SECRET: "여기에_입력하세요"
+
+HARDWARE:
+  USE_CUDA: True
+  NUM_CORES: 10 # i5-14400 6(P)+4(E) 코어 활용
+  VRAM_LIMIT_GB: 8 # RTX 4060 기준
+
+PATH:
+  DATA_CACHE: "./data_cache"
+  MODEL_SAVE: "./models"
+  LOG_DIR: "./logs"
+
+TRAINING:
+  BATCH_SIZE: 128
+  EPOCHS: 50
+  LEARNING_RATE: 0.0001
