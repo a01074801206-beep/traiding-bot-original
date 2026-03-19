@@ -1,19 +1,18 @@
-# Monster_Quant 프로젝트 환경 설정
-API_KEYS:
-  NAVER_CLIENT_ID: "여기에_입력하세요"
-  NAVER_CLIENT_SECRET: "여기에_입력하세요"
-
-HARDWARE:
-  USE_CUDA: True
-  NUM_CORES: 10 # i5-14400 6(P)+4(E) 코어 활용
-  VRAM_LIMIT_GB: 8 # RTX 4060 기준
-
-PATH:
-  DATA_CACHE: "./data_cache"
-  MODEL_SAVE: "./models"
-  LOG_DIR: "./logs"
-
-TRAINING:
-  BATCH_SIZE: 128
-  EPOCHS: 50
-  LEARNING_RATE: 0.0001
+# 시드머니 규모에 따른 동적 자산 배분 설정
+strategy:
+  phases:
+    - min_balance: 0
+      max_balance: 1000000        # 100만 원 미만
+      scalping: 1.0               # 100% 스캘핑
+      contrarian: 0.0
+      stable: 0.0
+    - min_balance: 1000000
+      max_balance: 2000000        # 100만 원 ~ 200만 원 미만
+      scalping: 0.8               # 80% 스캘핑
+      contrarian: 0.2             # 20% 낙주매매
+      stable: 0.0
+    - min_balance: 2000000        # 200만 원 이상
+      max_balance: 999999999
+      scalping: 0.2               # 20% 스캘핑
+      contrarian: 0.15            # 15% 낙주매매
+      stable: 0.65                # 65% 안정수익
