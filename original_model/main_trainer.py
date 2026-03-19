@@ -1,5 +1,5 @@
-from trading_gym_env import TradingGymEnv
-from dqn_trading_model import DQNAgent
+from src.environment.trading_gym_env import TradingGymEnv
+from src.models.dqn_trading_model import DQNAgent
 import torch
 
 def start_training(strategy='SCALPING_20', episodes=100):
