@@ -1,7 +1,7 @@
 import os
 import pandas as pd
-import numpy as np
-from datetime import datetime
+# 만약 utils에 경로 설정 파일을 만드셨다면:
+# from src.utils.paths import DATA_LAKE_DIR
 
 class AtomicFeatureEngineer:
     """
