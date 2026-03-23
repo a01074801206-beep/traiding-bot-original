@@ -1,59 +1,117 @@
 import os
 import pandas as pd
+import FinanceDataReader as fdr
 from pykrx import stock
-from datetime import datetime, timedelta
+from datetime import datetime
 from src.data.inventory_db import InventoryDB
-from src.config.trading_config import TradingConfig
 
 class DataCollector:
-    def __init__(self, save_path="D:/trading_data"):
-        self.save_path = save_path
+    def __init__(self, base_path="D:/trading_data"):
+        self.base_path = base_path
+        self.macro_path = os.path.join(base_path, "macro")
         self.db = InventoryDB()
-        os.makedirs(self.save_path, exist_ok=True)
+        
+        # 폴더 생성
+        os.makedirs(self.base_path, exist_ok=True)
+        os.makedirs(self.macro_path, exist_ok=True)
 
-    def collect_all_stocks(self, start_date="20210101", end_date=None):
-        """전체 종목의 5년치 OHLCV 데이터를 수집"""
-        if end_date is None:
-            end_date = datetime.now().strftime("%Y%m%d")
+    def collect_all(self, start_date="20210101"):
+        """
+        [통합 실행] 1.시장지표 -> 2.섹터지도 -> 3.전종목 주가 수집
+        """
+        print("🏁 통합 수집 프로세스 시작...")
+        
+        # 1. 시장 지표 및 공포지수 수집
+        self._collect_macro_indices(start_date)
+        
+        # 2. 섹터(테마) 지도 생성
+        self._collect_sector_map()
+        
+        # 3. 개별 종목 주가(OHLCV) 수집
+        self._collect_stock_ohlcv(start_date)
+        
+        print("\n🚀 모든 데이터 수집 및 990 Pro 저장 완료!")
 
-        # 1. 현재 상장된 모든 종목 리스트 가져오기 (KOSPI + KOSDAQ)
+    def _collect_macro_indices(self, start_date):
+        """시장 지표 (나스닥, VIX, 환율, 국채금리 등)"""
+        print("🌐 시장 지표(Macro) 수집 중...")
+        indices = {
+            'KS11': 'KOSPI',
+            'KQ11': 'KOSDAQ',
+            'IXIC': 'NASDAQ',
+            'VIX': 'VIX',         # 공포지수
+            'USD/KRW': 'FX_USD',   # 환율
+            'US10YT=X': 'US_10Y'   # 미국 10년물 국채금리
+        }
+        
+        for symbol, name in indices.items():
+            try:
+                df = fdr.DataReader(symbol, start_date)
+                if not df.empty:
+                    file_path = os.path.join(self.macro_path, f"{name}.parquet")
+                    df.to_parquet(file_path)
+                    # DB에 마크 (최신 날짜 기준)
+                    last_date = df.index[-1].strftime("%Y%m%d")
+                    self.db.mark_date_data(last_date, f"macro_{name}")
+                    print(f"  - {name} 수집 완료")
+            except Exception as e:
+                print(f"  - {name} 수집 실패: {e}")
+
+    def _collect_sector_map(self):
+        """2,700개 종목의 섹터/업종 매핑 데이터"""
+        print("📁 섹터 및 테마 정보 수집 중...")
+        try:
+            df_krx = fdr.StockListing('KRX')
+            # 필요한 컬럼만 추출 (종목코드, 이름, 업종, 주요제품)
+            df_sectors = df_krx[['Symbol', 'Name', 'Sector', 'Industry']]
+            file_path = os.path.join(self.base_path, "sector_map.parquet")
+            df_sectors.to_parquet(file_path)
+            print(f"  - {len(df_sectors)}개 종목 섹터 지도 저장 완료")
+        except Exception as e:
+            print(f"  - 섹터 수집 실패: {e}")
+
+    def _collect_stock_ohlcv(self, start_date):
+        """전 종목 주가 및 수급 데이터"""
+        end_date = datetime.now().strftime("%Y%m%d")
+        
+        # 전 종목 리스트 가져오기
         tickers = stock.get_market_ticker_list(market="ALL")
         
-        # 2. DB를 조회해서 이미 완료된 종목 제외 (중복 작업 방지)
+        # DB를 조회해서 이미 완료된 종목 제외 (인벤토리 체크)
         pending_tickers = self.db.get_incomplete_tickers(tickers)
-        print(f"🚀 수집 시작: 전체 {len(tickers)}개 중 {len(pending_tickers)}개 진행")
+        print(f"📈 주가 데이터 수집 시작 (남은 대상: {len(pending_tickers)}개)")
 
         for ticker in pending_tickers:
             try:
-                name = stock.get_market_ticker_name(ticker)
-                # 3. 주가 데이터 다운로드 (1분봉은 증권사 API 필요, 여기선 일봉 기준 예시)
-                df = stock.get_market_ohlcv_by_date(start_date, end_date, ticker)
+                # 1. 주가 데이터 (일봉)
+                df_ohlcv = stock.get_market_ohlcv_by_date(start_date, end_date, ticker)
+                if df_ohlcv.empty: continue
                 
-                if df.empty:
-                    continue
-
-                # 4. 990 Pro에 Parquet 형태로 저장 (압축률 및 속도 최적화)
-                ticker_dir = os.path.join(self.save_path, ticker)
+                # 2. 투자자별 순매수량 (수급 데이터 도킹용)
+                df_investor = stock.get_market_net_purchases_of_equities_by_ticker(start_date, end_date, ticker)
+                
+                # 주가와 수급 합치기
+                df_combined = pd.concat([df_ohlcv, df_investor], axis=1)
+                
+                # 990 Pro 전용 경로 저장
+                ticker_dir = os.path.join(self.base_path, ticker)
                 os.makedirs(ticker_dir, exist_ok=True)
                 
-                # 날짜별로 저장하거나 통째로 저장 (5년치 일봉은 통째가 유리)
                 file_path = os.path.join(ticker_dir, f"{ticker}_daily.parquet")
-                df.to_parquet(file_path)
-
-                # 5. Inventory DB에 수집 현황 마킹
+                df_combined.to_parquet(file_path)
+                
+                # Inventory DB 등록
                 self.db.update_stock_status(
                     ticker=ticker,
                     start=start_date,
                     end=end_date,
-                    rows=len(df)
+                    rows=len(df_combined)
                 )
-                print(f"✅ {name}({ticker}) 수집 완료: {len(df)}행 저장")
-
+                print(f"  ✅ {ticker} 완료 ({len(df_combined)}일치)", end="\r")
+                
             except Exception as e:
-                print(f"❌ {ticker} 수집 중 에러 발생: {e}")
+                print(f"\n❌ {ticker} 처리 중 에러: {e}")
 
-    def collect_macro_data(self):
-        """환율, 나스닥 등 거시경제 지표 수집 슬롯 (도킹용)"""
-        # FinanceDataReader 등을 활용해 환율, 지수 수집 로직 추가 가능
-        print("🌐 거시경제 지표 수집을 준비 중입니다...")
-        # 수집 후 self.db.mark_date_data(date, 'macro') 호출
+if __name__ == "__main__":
+    collector = DataCollector()
+    collector.collect_all()
