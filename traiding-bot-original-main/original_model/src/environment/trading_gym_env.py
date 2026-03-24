@@ -13,76 +13,87 @@ class TradingGymEnv(gym.Env):
         self.initial_balance = initial_balance
         self.balance = initial_balance
         self.shares_held = 0
-        self.cost_basis = 0  # 평단가 (FinRL 참고: 수익률 계산용)
+        self.cost_basis = 0
         self.current_step = 0
+        
+        # [추가] 데이터 전처리: 한글 컬럼명을 영어로 매핑하거나 직접 참조 방어
+        self.price_col = '종가' if '종가' in self.df.columns else 'close'
+        self.rsi_col = 'RSI' if 'RSI' in self.df.columns else 'rsi'
+        
         return self._get_observation()
 
     def _get_observation(self):
-        """
-        [개선사항] 시장 데이터 + 계좌 상태를 결합한 하이브리드 벡터 반환
-        """
         # 1. 시장 데이터 (OHLCV + 도킹된 지표들)
         market_state = self.df.iloc[self.current_step].values
         
-        # 2. 계좌 상태 (FinRL 정밀 모델링 참고)
-        current_price = self.df.iloc[self.current_step]['close']
+        # 2. 계좌 상태 (한글 컬럼 대응)
+        current_price = self.df.iloc[self.current_step][self.price_col]
+        
+        # 보유 종목 수익률 계산 (평단가 기준)
         unrealized_profit = (current_price - self.cost_basis) / (self.cost_basis + 1e-8) if self.shares_held > 0 else 0
         
         portfolio_state = np.array([
-            self.balance / TradingConfig.STABLE_THRESHOLD, # 현재 잔고의 목표 달성률 (0~1 사이 정규화)
-            self.shares_held * current_price / (self.balance + self.shares_held * current_price + 1e-8), # 자산 대비 주식 비중
-            unrealized_profit, # 현재 보유 종목의 수익률 상태
-            self.current_step / len(self.df) # 에피소드 진행률 (시간 개념 주입)
+            self.balance / 2000000.0, # TradingConfig.STABLE_THRESHOLD 대신 가시적인 값으로 정규화
+            self.shares_held * current_price / (self.balance + self.shares_held * current_price + 1e-8),
+            unrealized_profit,
+            self.current_step / len(self.df)
         ])
         
-        # 3. 결합 (Market + Portfolio)
-        return np.concatenate([market_state, portfolio_state]).astype(np.float32)
-
-    def _get_reward(self, total_assets, daily_return):
-        """
-        [개선사항] FinRL의 샤프 지수 개념을 3단계 전략에 녹여냄
-        """
-        rsi = self.df.iloc[self.current_step].get('rsi', 50)
-        
-        # 1단계: 100만 원 미만 (공격적 수익 중심)
-        if total_assets < TradingConfig.SCALPING_THRESHOLD:
-            return daily_return * 100.0
-        
-        # 2단계: 100만 ~ 200만 (수수료 극복 + 낙폭 과대 매수 보너스)
-        elif total_assets < TradingConfig.STABLE_THRESHOLD:
-            bonus = 0.2 if rsi < 30 else 0 # 과매도 구간 매수 유도
-            return (daily_return + bonus) * 2.0
-            
-        # 3단계: 200만 원 이상 (안정성 중심 - MDD 방어 보상)
-        else:
-            # 변동성 대비 수익(안정성)을 보상으로 환산
-            return daily_return * 1.5
+        # 3. 결합 및 타입 변환 (float32로 고정해야 GPU 연산 시 에러가 안 남)
+        obs = np.concatenate([market_state, portfolio_state]).astype(np.float32)
+        return obs
 
     def step(self, action):
-        current_price = self.df.iloc[self.current_step]['close']
+        # 현재가 참조
+        current_price = self.df.iloc[self.current_step][self.price_col]
         
-        # 매수 로직 (평단가 계산 추가)
+        # 매수 로직 (수수료 및 슬리피지 반영)
         if action == 1: 
             if self.balance > current_price:
-                buy_cost = current_price * (1 + TradingConfig.COMMISSION_RATE + TradingConfig.SLIPPAGE)
-                new_shares = self.balance // buy_cost
-                # FinRL 방식: 평단가 업데이트 (가중 평균)
-                total_shares = self.shares_held + new_shares
-                self.cost_basis = ((self.shares_held * self.cost_basis) + (new_shares * buy_cost)) / total_shares
-                self.shares_held = total_shares
-                self.balance -= (new_shares * buy_cost)
+                # 수수료/슬리피지 계산 (TradingConfig 값 활용)
+                fee_rate = getattr(TradingConfig, 'COMMISSION_RATE', 0.00015)
+                slippage = getattr(TradingConfig, 'SLIPPAGE', 0.001)
+                
+                buy_unit_price = current_price * (1 + fee_rate + slippage)
+                new_shares = self.balance // buy_unit_price
+                
+                if new_shares > 0:
+                    total_shares = self.shares_held + new_shares
+                    self.cost_basis = ((self.shares_held * self.cost_basis) + (new_shares * buy_unit_price)) / total_shares
+                    self.shares_held = total_shares
+                    self.balance -= (new_shares * buy_unit_price)
 
         # 매도 로직
         elif action == 2:
             if self.shares_held > 0:
-                sell_price = current_price * (1 - TradingConfig.TAX_RATE - TradingConfig.COMMISSION_RATE - TradingConfig.SLIPPAGE)
+                tax_rate = getattr(TradingConfig, 'TAX_RATE', 0.002)
+                fee_rate = getattr(TradingConfig, 'COMMISSION_RATE', 0.00015)
+                
+                sell_price = current_price * (1 - tax_rate - fee_rate)
                 self.balance += (self.shares_held * sell_price)
                 self.shares_held = 0
                 self.cost_basis = 0
 
         self.current_step += 1
         done = self.current_step >= len(self.df) - 1
+        
+        # 총 자산 및 보상 계산
         total_assets = self.balance + (self.shares_held * current_price)
         daily_return = (total_assets - self.initial_balance) / self.initial_balance
         
-        return self._get_observation(), self._get_reward(total_assets, daily_return), done, {}
+        reward = self._get_reward(total_assets, daily_return)
+        
+        return self._get_observation(), reward, done, {}
+
+    def _get_reward(self, total_assets, daily_return):
+        # RSI 지표 확인
+        rsi = self.df.iloc[self.current_step].get(self.rsi_col, 50)
+        
+        # 사용자님의 단계별 보상 로직 적용
+        if total_assets < 1000000: # 공격적
+            return daily_return * 100.0
+        elif total_assets < 2000000: # 중립
+            bonus = 0.2 if rsi < 30 else 0
+            return (daily_return + bonus) * 2.0
+        else: # 안정 (MDD 방어)
+            return daily_return * 1.5
